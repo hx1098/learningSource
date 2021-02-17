@@ -1531,3 +1531,223 @@ redis-cli -p 7617
 
 
 
+##### 5.redis集群Cluster
+
+###### 1.自动创建伪集群
+
+这个是redis自带的, 无主模型的多节点Cluster, 每个主机认领自己的槽位
+
+```bash
+cd /root/soft/redis-5.0.8/utils/create-cluster
+#查看README
+
+vim create-cluster
+
+#!/bin/bash
+# Settings
+PORT=30000
+TIMEOUT=2000
+NODES=6
+REPLICAS=1
+........
+
+
+#port, timeout就不多解释了, nodes: 就是你的节点数量, replicas:就是副本数量．
+# 6个节点,一个副本就是三主三从,就是说  (副本数) + (主节点数)  = 6
+# (副本数 + 一个主节点) * 组数 = 6
+# 即(1+1)*3 = 6
+
+clear
+#先把六个实例跑起来,
+./create-cluster start
+#分槽位,并且添加主从配置, 30005是30001的备份, 30006是30002的备份
+./create-cluster create
+>>> Performing hash slots allocation on 6 nodes...
+Master[0] -> Slots 0 - 5460
+Master[1] -> Slots 5461 - 10922
+Master[2] -> Slots 10923 - 16383
+Adding replica 127.0.0.1:30005 to 127.0.0.1:30001
+Adding replica 127.0.0.1:30006 to 127.0.0.1:30002
+Adding replica 127.0.0.1:30004 to 127.0.0.1:30003
+>>> Trying to optimize slaves allocation for anti-affinity
+[WARNING] Some slaves are in the same host as their master
+M: c1f7cc998f7f45aff38d8b18b9b5322be914b49b 127.0.0.1:30001
+   slots:[0-5460] (5461 slots) master
+M: e90fea5b6329c828c57213a437bd6dd8c63e9312 127.0.0.1:30002
+   slots:[5461-10922] (5462 slots) master
+M: 17f81df8e2fc57c595b603d94f00f2a51960e703 127.0.0.1:30003
+   slots:[10923-16383] (5461 slots) master
+S: 6445bdae2465ba3dda3b78b920964780c4ec6c8c 127.0.0.1:30004
+   replicates c1f7cc998f7f45aff38d8b18b9b5322be914b49b
+S: 7f5effa3f335c4786c69e5371143711f1095021f 127.0.0.1:30005
+   replicates e90fea5b6329c828c57213a437bd6dd8c63e9312
+S: a65179a033e60d35fe752ec1fffc42f7d1938550 127.0.0.1:30006
+   replicates 17f81df8e2fc57c595b603d94f00f2a51960e703
+Can I set the above configuration? (type 'yes' to accept): 
+yes
+```
+
+
+
+```bash
+#输入yes之后,可以先链接一个30001节点试一下塞入数据
+[root@node01 ~]# redis-cli -p 30001
+127.0.0.1:30001> set k1 dsfds
+(error) MOVED 12706 127.0.0.1:30003
+##他会给你返回一个错误, 说让存储到 30003当中的redis中,so, 你要这样玩:
+redis-cli -c  -p 30001
+127.0.0.1:30001> set k1 1232
+-> Redirected to slot [12706] located at 127.0.0.1:30003
+OK
+127.0.0.1:30003>
+#他其实是跳转到了30003去存数据了.
+
+127.0.0.1:30003> set k2 123445
+-> Redirected to slot [449] located at 127.0.0.1:30001
+OK
+127.0.0.1:30001> get k1
+-> Redirected to slot [12706] located at 127.0.0.1:30003
+"1232"
+127.0.0.1:30003>
+#当你在30001取30003的数据时候, 会给你路由到30001
+
+#事物问题
+127.0.0.1:30003> WATCH k2 
+-> Redirected to slot [449] located at 127.0.0.1:30001
+OK
+127.0.0.1:30001> MULTI 
+OK
+127.0.0.1:30001> set k1 helloworld
+-> Redirected to slot [12706] located at 127.0.0.1:30003
+OK
+127.0.0.1:30003> set sdfsdf
+(error) ERR wrong number of arguments for 'set' command
+127.0.0.1:30003> set sdfsdf 23432
+OK
+127.0.0.1:30003> exec
+(error) ERR EXEC without MULTI
+127.0.0.1:30003> 
+#总结:  当你在30003开启事物时候, 他跳转到了30001, set数据时候在30001, 来回跳转时候不会命中30001事物, 也就是说事物是不会进行路由的.
+
+如何解决:
+127.0.0.1:30003> set {oo}k1 hellohello
+-> Redirected to slot [1629] located at 127.0.0.1:30001
+OK
+127.0.0.1:30001> set {oo}k2 wrold
+OK
+127.0.0.1:30001> set {oo}k3 nishihui
+OK
+127.0.0.1:30001> WATCH {oo}k1
+OK
+127.0.0.1:30001> MULTI
+OK
+127.0.0.1:30001> set {oo}k2 woaibiancheng
+QUEUED
+127.0.0.1:30001> get {oo}k3
+QUEUED
+127.0.0.1:30001> exec
+1) OK
+2) "nishihui"
+127.0.0.1:30001> 
+
+
+```
+
+结束:
+
+```bash
+./create-cluster stop
+#清除, 包含aof文件
+./create-cluster clean
+
+./create-cluster start
+redis-cli --cluster help
+#使用这个命令可以看到手动创建集群的方式, 上面的是伪集群的方式
+```
+
+![image-20210216112050361](image\image-20210216112050361.png)
+
+###### 2.手动创建集群
+
+其实这里小编因为金钱的原因, 买不起那么多的服务器, 也没人愿意让我玩那么多的服务器, 我就暂且使用127.0.0.1加上端口号的方式吧!(贫穷限制了我的想象)
+
+```bash
+#把原来的先停掉再清理一下
+./create-cluster stop
+#清除, 包含aof文件
+./create-cluster clean
+#先启动redis, 如果不是在同一台机器, 就必须保证他们都是启动的, 并且可以通讯.
+./create-cluster start
+
+#指定ip和端口进行集群
+./create-cluster create 127.0.0.1:30001  127.0.0.1:30002 127.0.0.1:30003 127.0.0.1:30004 127.0.0.1:30005 127.0.0.1:30006  --cluster-replicas 
+
+#链接测试数据
+redis-cli -c -p 30001
+set k1 234
+```
+
+进阶命令:
+
+```bash
+#槽位转移
+redis-cli --cluster help #自己看帮助
+redis-cli --cluster 127.0.0.1:30001
+#你想移动多少个槽位来着? 2000
+#你想把这2000个槽位发给谁?  e44e8794d1dd774cd497e47a3e24439456cec630  他原有槽位:slots:[10923-16383]
+#all 将所有节点作用于哈希槽的源节点(从所有的节点抽出来)  or 输入指定的节点id
+#178f86a6898c1e67f91972042d9677ce972ae10f
+#done (结束)
+#后续输入yes即可.
+```
+
+
+
+![image-20210216141007191](D:\资料整理\learningSource\09-redis\image\image-20210216141007191.png)
+
+![image-20210216142118287](image\image-20210216142118287.png)
+
+```bash
+#查看移动后的信息
+redis-cli --cluster info 127.0.0.1:30001
+redis-cli --cluster check 127.0.0.1:30001
+#可以看到第一个master中失去了2000个槽位, 第二个master多出了1~2000的槽位.  第三个master没有改变.
+
+[root@node01 create-cluster]# redis-cli --cluster info 127.0.0.1:30001
+127.0.0.1:30001 (178f86a6...) -> 0 keys | 3461 slots | 1 slaves.
+127.0.0.1:30003 (e44e8794...) -> 1 keys | 7461 slots | 1 slaves.
+127.0.0.1:30002 (7c4507cf...) -> 0 keys | 5462 slots | 1 slaves.
+[OK] 1 keys in 3 masters.
+0.00 keys per slot on average.
+[root@node01 create-cluster]# redis-cli --cluster check 127.0.0.1:30001
+127.0.0.1:30001 (178f86a6...) -> 0 keys | 3461 slots | 1 slaves.
+127.0.0.1:30003 (e44e8794...) -> 1 keys | 7461 slots | 1 slaves.
+127.0.0.1:30002 (7c4507cf...) -> 0 keys | 5462 slots | 1 slaves.
+[OK] 1 keys in 3 masters.
+0.00 keys per slot on average.
+>>> Performing Cluster Check (using node 127.0.0.1:30001)
+M: 178f86a6898c1e67f91972042d9677ce972ae10f 127.0.0.1:30001
+   slots:[2000-5460] (3461 slots) master
+   1 additional replica(s)
+M: e44e8794d1dd774cd497e47a3e24439456cec630 127.0.0.1:30003
+   slots:[0-1999],[10923-16383] (7461 slots) master
+   1 additional replica(s)
+S: c8ae0a666c6ebe86325f8618128aacfbf3edd602 127.0.0.1:30006
+   slots: (0 slots) slave
+   replicates 178f86a6898c1e67f91972042d9677ce972ae10f
+S: 633867769a03629883f01e84794305e862971b27 127.0.0.1:30005
+   slots: (0 slots) slave
+   replicates e44e8794d1dd774cd497e47a3e24439456cec630
+S: c085c34c94f73608df9c8dfd58d244347aaa3d52 127.0.0.1:30004
+   slots: (0 slots) slave
+   replicates 7c4507cf6992ff390fda76070c2458f2e855dcda
+M: 7c4507cf6992ff390fda76070c2458f2e855dcda 127.0.0.1:30002
+   slots:[5461-10922] (5462 slots) master
+   1 additional replica(s)
+[OK] All nodes agree about slots configuration.
+>>> Check for open slots...
+>>> Check slots coverage...
+[OK] All 16384 slots covered.
+
+```
+
